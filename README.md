@@ -54,6 +54,40 @@ sudo ip -n fj-server route get 10.200.1.1
 sudo bash probe_vpn.sh 10
 ```
 
+## Validate ICMP PMTU feedback
+
+On a fresh lab, run the firewall validation trial before the pressure trial:
+
+```bash
+sudo bash run_pmtu_validation.sh
+```
+
+This installs a rule at the start of `fj-server`'s INPUT chain for IPv4 ICMP
+Destination Unreachable / Fragmentation Needed (Type 3, Code 4). The rule
+accepts a PTB only when conntrack classifies it as `RELATED` to the tunnel's
+UDP flow, has `SEEN_REPLY` for that flow, and identifies the expected server
+address and WireGuard port. Conntrack matches the quoted UDP client port to
+the port of the existing flow. All other PTBs to the server are dropped,
+including quotes of an Echo Reply and a UDP packet with an unknown client
+port. The trial sends both rejected cases, then a valid-flow quote; it checks
+the server route after each case and prints firewall counters. It enables the
+policy before its baseline pings so conntrack sees traffic in both directions.
+The valid-flow case deliberately still lowers PMTU, so reset the lab before
+another baseline.
+
+To manage the rule separately:
+
+```bash
+sudo bash pmtu_firewall.sh enable
+sudo bash pmtu_firewall.sh show
+sudo bash pmtu_firewall.sh disable
+```
+
+This checks flow association, not whether the PTB came from a real router or
+quoted a packet actually sent. A forged quote for a bidirectional WireGuard
+flow can still pass. The rule is scoped to this IPv4 namespace topology; it
+does not configure a host firewall or IPv6.
+
 To watch outer IPv4 fragments during a probe or trial, run in another terminal:
 
 ```bash

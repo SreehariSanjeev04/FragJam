@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""One bounded ICMP Fragmentation Needed signal for this lab's WireGuard peer.
+"""Bounded ICMP Fragmentation Needed signals for this lab's WireGuard peer.
 
 Run only inside fj-router. The quoted UDP flow is derived from fj-server's
-authenticated WireGuard endpoint; no destination or MTU is user-configurable.
+authenticated WireGuard endpoint; the alternate quotes exercise PTB rejection.
+No outer destination or MTU is user-configurable.
 """
+import argparse
 import os
 import re
 import subprocess
@@ -15,6 +17,13 @@ ROUTER = "10.200.1.1"
 SERVER = "10.200.1.2"
 NEXT_HOP_MTU = 552
 SERVER_WG_PORT = 51820
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument(
+    "--case", choices=("valid-udp", "unvalidated-udp-port", "echo-reply"),
+    default="valid-udp", help="quoted packet used in the PTB",
+)
+case = parser.parse_args().case
 
 if os.stat("/proc/self/ns/net").st_ino != os.stat("/var/run/netns/fj-router").st_ino:
     raise SystemExit("Refusing to run outside the fj-router namespace")
@@ -32,14 +41,17 @@ host, port_text = endpoint.rsplit(":", 1)
 if host != ROUTER or not port_text.isdecimal() or not (1 <= int(port_text) <= 65535):
     raise SystemExit(f"Unexpected server peer endpoint: {endpoint}")
 
-# ICMP quotes the original outer IPv4 header and eight UDP bytes. Build a
-# plausible oversized WireGuard datagram so the quote has correct lengths and
-# checksums, then include only the part an IPv4 ICMP error needs to quote.
-original = bytes(
-    IP(src=SERVER, dst=ROUTER, flags="DF")
-    / UDP(sport=SERVER_WG_PORT, dport=int(port_text))
-    / Raw(b"W" * 1000)
-)
+# ICMP quotes the original outer IPv4 header and eight transport bytes. Build
+# a plausible oversized datagram with correct lengths and checksums, then
+# include only the part an IPv4 ICMP error needs to quote.
+if case == "echo-reply":
+    inner = ICMP(type=0, code=0) / Raw(b"E" * 1000)
+else:
+    client_port = int(port_text) if case == "valid-udp" else 1
+    if case == "unvalidated-udp-port" and client_port == int(port_text):
+        client_port = 2
+    inner = UDP(sport=SERVER_WG_PORT, dport=client_port) / Raw(b"W" * 1000)
+original = bytes(IP(src=SERVER, dst=ROUTER, flags="DF") / inner)
 quoted_header = original[:28]
 signal = (
     IP(src=ROUTER, dst=SERVER)
@@ -59,15 +71,20 @@ if cached_mtu and int(cached_mtu.group(1)) < 1500:
         f"Server already has a reduced PMTU ({cached_mtu.group(1)}); "
         "reset the lab with cleanup.sh and setup.sh before a new trial"
     )
-print(f"Server endpoint: {endpoint}; advertised PMTU: {NEXT_HOP_MTU}", flush=True)
+print(f"Server endpoint: {endpoint}; case: {case}; advertised PMTU: {NEXT_HOP_MTU}", flush=True)
 print(f"Route before: {before}", flush=True)
 conf.verb = 0
 for attempt in range(1, 4):
     send(signal, verbose=0)
     time.sleep(0.3)
     state = route_state()
-    if re.search(r"\bmtu\s+552\b", state):
+    changed = re.search(r"\bmtu\s+552\b", state)
+    if case == "valid-udp" and changed:
         print(f"Route after attempt {attempt}: {state}", flush=True)
         break
+    if case != "valid-udp" and changed:
+        raise SystemExit(f"Rejected case {case} unexpectedly reduced PMTU: {state}")
 else:
-    raise SystemExit(f"PMTU 552 was not observed after three signals. Route: {state}")
+    if case == "valid-udp":
+        raise SystemExit(f"PMTU 552 was not observed after three signals. Route: {state}")
+    print(f"Rejected case {case} left route unchanged: {state}", flush=True)
