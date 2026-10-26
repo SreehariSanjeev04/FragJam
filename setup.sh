@@ -74,9 +74,8 @@ ip -n fj-client route add default via 10.200.2.1
 ip -n fj-server route add default via 10.200.1.1
 ip netns exec fj-router sysctl -q -w net.ipv4.ip_forward=1
 
-# Force server UDP replies to fragment. These settings affect only the lab interfaces.
-ip -n fj-server link set veth-s mtu 600
-ip -n fj-router link set veth-r1 mtu 600
+# Keep the underlay at its normal Ethernet MTU. The trial uses a fabricated
+# ICMP Fragmentation Needed message to lower the server's cached path MTU.
 
 # Invoke conntrack-based defragmentation on the gateway.
 ip netns exec fj-router iptables -t nat -A POSTROUTING \
@@ -95,8 +94,8 @@ ip netns exec fj-server wg set wg0 listen-port 51820 \
     peer "$client_public" allowed-ips 10.77.0.2/32
 ip -n fj-client address add 10.77.0.2/24 dev wg0
 ip -n fj-server address add 10.77.0.1/24 dev wg0
-# A 1000-byte ICMP payload fits this tunnel MTU but makes the encrypted
-# outer IPv4/UDP datagram exceed the 600-byte server-side link MTU.
+# A 1000-byte ICMP payload fits this tunnel MTU and, before the PMTU signal,
+# fits inside the 1500-byte underlay after WireGuard encapsulation.
 ip -n fj-client link set dev wg0 mtu 1180 up
 ip -n fj-server link set dev wg0 mtu 1180 up
 
@@ -133,9 +132,9 @@ if (( handshake_ready == 0 )); then
     ip netns exec fj-router iptables -t nat -L POSTROUTING -n -v
     exit 1
 fi
-echo 'Checking WireGuard tunnel with fragmented outer UDP packets:'
+echo 'Checking large WireGuard packets before the PMTU signal:'
 if ! ip netns exec fj-client ping -n -I wg0 -M dont -s 1000 -c 3 -W 2 -w 7 10.77.0.1; then
-    echo 'Large tunnel packets failed before pressure; inspect outer fragments on veth-r1.' >&2
+    echo 'Large tunnel packets failed before the PMTU signal; fix the baseline first.' >&2
     ip netns exec fj-client wg show wg0
     ip netns exec fj-server wg show wg0
     ip netns exec fj-router nstat -az IpReasmReqds IpReasmOKs IpReasmFails
